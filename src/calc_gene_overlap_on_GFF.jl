@@ -175,7 +175,7 @@ function parse_commandline()
     return parse_args(s)
 end
 
-function gen_arch()
+function main()
     args = parse_commandline()
 
     if !isdir(args["inputdir"])
@@ -199,4 +199,4 @@ function gen_arch()
     println("Done.")
 end
 
-gen_arch()
+main()
