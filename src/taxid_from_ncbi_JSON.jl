@@ -1,264 +1,174 @@
-
 #-----------------------------------------------------------------
-#   Description:    From JSONL from NCBI retrieve INFO. 
+#   Description:    From JSONL from NCBI retrieve INFO.
 #   Author:         SHP
 #   Date:           2025
-#-----------------------------------------------------------------
-#-----------------------------------------------------------------
-
+#   Revised:        2025-08-07
 #-----------------------------------------------------------------
 #= 
-Notes. This data comes from downloading data from the NCBI
-using the command line toolkit. 
-I used the following command to download all refence gffs. 
-
-
+Notes:
+This data comes from downloading data from the NCBI using the command line toolkit.
+I used the following command to download all refence gffs:
 datasets download genome taxon 2 --assembly-source refseq --reference --include gff3,gtf,seq-report --dehydrated --filename bacteria_reference.zip
 datasets download genome taxon 2157 --assembly-source refseq --reference --include gff3,gtf,seq-report --dehydrated --filename archaea_reference.zip
 datasets rehydrate --directory archaea_reference/ 
 datasets rehydrate --directory bacteria_reference/ 
 
-The command download all gff3, gts and seq reports. I am to query the accompagnying JSON file for info on the assmblies etc. 
+The command download all gff3, gts and seq reports.
+I am to query the accompagnying JSON file for info on the assmblies etc. 
 
-the taxdump is obtained from ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
+The taxdump is obtained from ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
 =#
-#-----------------------------------------------------------------
 
 #-----------------------------------------------------------------
-# preamble
-# activate env
+# preamble: packages
 #-----------------------------------------------------------------
+using Pkg
+Pkg.activate(".") # Activate environment in current directory
 
-begin
-    using Pkg
-    cd("d:")
-    cd("programming/")
-    Pkg.activate("iodine")
-end
-
-#-----------------------------------------------------------------
-# load packages
-#-----------------------------------------------------------------
-
-using CSV # to write CSV.
-using JSON3 # to read JSON.
-using DataFrames # to be able to use dataframes in general. 
-
-#-----------------------------------------------------------------
-# Identify data to load
-#-----------------------------------------------------------------
-
-datB = "D:/ncbi_downloads/bactera_reference/ncbi_dataset/data/assembly_data_report.jsonl"
-datA = "D:/ncbi_downloads/archaea_reference/ncbi_dataset/data/assembly_data_report.jsonl"
-datAB = [datA, datB]
-
-#-----------------------------------------------------------------
-# Create function for full taxonomic identification based on NCBI taxdump
-#-----------------------------------------------------------------
-
+using ArgParse
+using CSV
+using DataFrames
+using JSON3
 using Taxonomy
 
-taxNodes = "../ncbi_downloads/taxdump/nodes.dmp"
-taxNames = "../ncbi_downloads/taxdump/names.dmp"
+#-----------------------------------------------------------------
+# Helper Functions
+#-----------------------------------------------------------------
 
+"""
+    get_nested(obj, keys...; default=missing)
 
-
-function getFullTaxonomy(
-    taxId,
-    taxNodesLoc::String,
-    taxNamesLoc::String,
-    )
-
-    errNode = isfile(taxNodesLoc)
-    errNode == true || throw("$taxNodesLoc is not a file")
-    errName = isfile(taxNamesLoc)
-    errName == true || throw("$taxNamesLoc is not a file")
-
-    db =  Taxonomy.DB(taxNodesLoc,taxNamesLoc)
-
-    taxid_ordered_dataframe = DataFrame(
-        superkingdom = String[],
-        phylum = String[],
-        class = String[],
-        order = String[],
-        family = String[],
-        genus_tax = String[],
-        species = String[]
-    )
-
-    for id in taxId
-
-        superkingdom = "NA"
-        phylum = "NA"
-        class = "NA"
-        order = "NA"
-        family = "NA"
-        genus_tax = "NA"
-        species = "NA"
-        lineage_tax = "NA"
-
-        try 
-            tax = Taxon(id, db)
-            lineage_tax = Lineage(tax)
-        catch;
-            lineage_tax = "NA"
+Safely retrieve a nested value from a JSON object.
+"""
+function get_nested(obj, keys...; default=missing)
+    val = obj
+    for k in keys
+        if !isnothing(val) && haskey(val, k)
+            val = val[k]
+        else
+            return default
         end
+    end
+    return val
+end
 
-        try 
-            superkingdom = string(lineage_tax[:superkingdom])
-        catch;
-            superkingdom = "NA"
-        end
+"""
+    getFullTaxonomy(tax_ids, db)
 
-        try 
-            phylum = string(lineage_tax[:phylum])
-        catch;
-            phylum = "NA"
-        end
-
-        try 
-            class = string(lineage_tax[:class])
-        catch;
-            class = "NA"
-        end
-
-        try 
-            order = string(lineage_tax[:order])
-        catch;
-            order = "NA"
-        end
-
-        try 
-            family = string(lineage_tax[:family])
-        catch;
-            family = "NA"
-        end
+For a list of taxon IDs, retrieve the full lineage for each.
+"""
+function getFullTaxonomy(tax_ids, db::Taxonomy.DB)
+    ranks = [:superkingdom, :phylum, :class, :order, :family, :genus, :species]
     
-        try 
-            genus_tax = string(lineage_tax[:genus])
-        catch;
-            genus_tax = "NA"
+    # Pre-allocate columns
+    tax_cols = [Vector{Union{Missing, String}}(undef, length(tax_ids)) for _ in ranks]
+
+    for (i, id) in enumerate(tax_ids)
+        if ismissing(id)
+            for (j, rank) in enumerate(ranks)
+                tax_cols[j][i] = missing
+            end
+            continue
         end
 
-        try 
-            species = string(lineage_tax[:species])
-        catch;
-            species = "NA"
+        try
+            lineage = Lineage(Taxon(id, db))
+            for (j, rank) in enumerate(ranks)
+                tax_cols[j][i] = haskey(lineage, rank) ? string(lineage[rank]) : missing
+            end
+        catch
+            for (j, rank) in enumerate(ranks)
+                tax_cols[j][i] = missing
+            end
         end
-
-        push!(taxid_ordered_dataframe, [
-            superkingdom,
-            phylum,
-            class,
-            order,
-            family,
-            genus_tax,
-            species
-        ])
     end
 
-    return taxid_ordered_dataframe
+    return DataFrame(collect(zip(ranks, tax_cols)))
+end
 
+
+#-----------------------------------------------------------------
+# Argument Parsing
+#-----------------------------------------------------------------
+function parse_commandline()
+    s = ArgParseSettings(description="Extract assembly metadata from NCBI JSONL files and add full taxonomy.")
+    @add_arg_table! s begin
+        "--jsonl", "-j"
+            help = "Input assembly_data_report.jsonl file(s)"
+            nargs = '+'
+            required = true
+        "--nodes", "-n"
+            help = "Path to NCBI taxdump nodes.dmp file"
+            required = true
+        "--names", "-m"
+            help = "Path to NCBI taxdump names.dmp file"
+            required = true
+        "--output", "-o"
+            help = "Output directory for the resulting CSV files"
+            required = true
+    end
+    return parse_args(s)
 end
 
 #-----------------------------------------------------------------
-# Identify data to load
+# Main Logic
 #-----------------------------------------------------------------
+function NCBItoJSON()
+    args = parse_commandline()
+    
+    println("Loading taxonomy database...")
+    tax_db = Taxonomy.DB(args["nodes"], args["names"])
+    
+    for jsonl_path in args["jsonl"]
+        if !isfile(jsonl_path)
+            @error "File not found: $jsonl_path. Skipping."
+            continue
+        end
 
-for (dat, n) in zip(datAB, ["Archaea", "Bacteria"])
-    output_folder = "iodine/output/"
-    s = JSON3.read(dat, jsonlines=true)
+        println("Processing file: $jsonl_path")
 
-    fd = DataFrame(
-        organismName        = Union{Missing, String}[],
-        taxId               = Union{Missing, Int64}[],
-        checkmSpeciesTaxId  = Union{Missing, Int}[],
-        accession           = Union{Missing, String}[],
-        completeness        = Union{Missing, Float64}[],
-        gcPercent           = Union{Missing, Float64}[]
-    
-    )
-    
-    for acc in s
-    
-        taxId               = Union{Missing, Int64}[]
-        organismName        = Union{Missing, String}[]
-        checkmSpeciesTaxId  = Union{Missing, Int}[]
-        completeness        = Union{Missing, Float64}[]
-        accession           = Union{Missing, String}[]
-        gcPercent           = Union{Missing, Float64}[]
-    
-        try
-            push!(taxId, acc.organism.taxId)
-        catch
-            push!(taxId, missing)
-        end
-    
-        try
-            push!(organismName, acc.organism.organismName)
-        catch
-            push!(organismName, missing)
-        end
-    
-        try
-            push!(checkmSpeciesTaxId, acc.checkmInfo.checkmSpeciesTaxId)
-        catch
-            push!(checkmSpeciesTaxId, missing)
-        end
-    
-        try
-            push!(completeness, acc.checkmInfo.completeness)
-        catch
-            push!(completeness, missing)
-        end
-    
-        try
-            push!(accession, acc.accession)
-        catch
-            push!(accession, missing)
-        end
-    
-        try
-            push!(gcPercent, acc.assemblyStats.gcPercent)
-        catch
-            push!(gcPercent, missing)
-        end
+        # Pre-allocate column vectors for performance
+        organismName = Union{Missing, String}[]
+        taxId = Union{Missing, Int}[]
+        checkmSpeciesTaxId = Union{Missing, Int}[]
+        accession = Union{Missing, String}[]
+        completeness = Union{Missing, Float64}[]
+        gcPercent = Union{Missing, Float64}[]
         
-        push!(
-            fd,
-            [
-                organismName[1],
-                taxId[1],
-                checkmSpeciesTaxId[1],
-                accession[1],
-                completeness[1],
-                gcPercent[1]
-            ]
-        );
-    
+        # Use JSON3.stream for memory-efficient processing of line-delimited JSON
+        for record in JSON3.stream(read(jsonl_path))
+            push!(organismName, get_nested(record, :organism, :organismName))
+            push!(taxId, get_nested(record, :organism, :taxId))
+            push!(accession, get_nested(record, :accession))
+            push!(checkmSpeciesTaxId, get_nested(record, :checkmInfo, :checkmSpeciesTaxId))
+            push!(completeness, get_nested(record, :checkmInfo, :completeness))
+            push!(gcPercent, get_nested(record, :assemblyStats, :gcPercent))
+        end
+
+        # Create DataFrame from collected data
+        df = DataFrame(
+            organismName = organismName,
+            taxId = taxId,
+            checkmSpeciesTaxId = checkmSpeciesTaxId,
+            accession = accession,
+            completeness = completeness,
+            gcPercent = gcPercent
+        )
+
+        println("Retrieving full taxonomy for $(nrow(df)) entries...")
+        full_tax = getFullTaxonomy(df.taxId, tax_db)
+        
+        # Combine the dataframes
+        df_final = hcat(df, full_tax)
+
+        # Write to output file
+        output_filename = first(split(basename(jsonl_path), '.')) * "_TaxId.csv"
+        output_path = joinpath(args["output"], output_filename)
+        
+        println("Writing results to: $output_path")
+        CSV.write(output_path, df_final)
     end
-    
-    #-----------------------------------------------------------------
-    # Write data to file
-    #-----------------------------------------------------------------
-    
-    fullTax = getFullTaxonomy(
-        fd.taxId,
-        taxNodes,
-        taxNames
-    )
-    
-    fdTax = hcat(fullTax, fd)
-
-    CSV.write(
-        string(output_folder, n, "TaxId.csv"),
-        fdTax
-    )
-
+    println("Done.")
 end
 
-
-
-
-
-
+NCBItoJSON()
