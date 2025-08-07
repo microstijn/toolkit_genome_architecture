@@ -72,7 +72,7 @@ end
 # Main Logic
 #-----------------------------------------------------------------
 
-function taxid_to_environment()
+function main()
     args = parse_commandline()
 
     if !isfile(args["input"])
@@ -116,4 +116,4 @@ function taxid_to_environment()
     println("Done.")
 end
 
-taxid_to_environment()
+main()
