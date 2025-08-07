@@ -113,7 +113,7 @@ end
 #-----------------------------------------------------------------
 # Main Logic
 #-----------------------------------------------------------------
-function NCBItoJSON()
+function main()
     args = parse_commandline()
     
     println("Loading taxonomy database...")
@@ -171,4 +171,4 @@ function NCBItoJSON()
     println("Done.")
 end
 
-NCBItoJSON()
+main()
