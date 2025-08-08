@@ -1,12 +1,13 @@
 #!/usr/bin/env julia
 
 #=====================================================
-# Description:  Controls anc combines the separate scripts. 
-# Author:       SHP
-# Date:         2025
-# Revised:      2025-08-07
-#=====================================================
-
+# Description:   Controls anc combines the separate scripts.
+# Author:        SHP
+# Date:          2025
+# Revised:       2025-08-07
+=====================================================#
+using Pkg
+Pkg.activate(".")
 using ArgParse
 
 # --- Script Definitions ---
@@ -14,7 +15,6 @@ const SCRIPT_DIR = @__DIR__
 const TAXONOMY_SCRIPT = joinpath(SCRIPT_DIR, "taxid_from_ncbi_JSON.jl")
 const ENVIRONMENT_SCRIPT = joinpath(SCRIPT_DIR, "environment_from_omnicrobe_by_taxid.jl")
 const ARCHITECTURE_SCRIPT = joinpath(SCRIPT_DIR, "calc_gene_overlap_on_GFF.jl")
-
 """
     run_command(command, step_name)
 
@@ -74,37 +74,52 @@ function main()
 
     # --- Setup ---
     # Create the main output directory if it doesn't exist.
-    mkpath(args["output-dir"])
+    mkpath(args["output_dir"])
 
-    # Define paths for taxdump files.
-    nodes_dmp = joinpath(args["taxdump-dir"], "nodes.dmp")
-    names_dmp = joinpath(args["taxdump-dir"], "names.dmp")
+    # Define paths for taxdump files, normalizing them to prevent path errors.
+    nodes_dmp = normpath(joinpath(args["taxdump_dir"], "nodes.dmp"))
+    names_dmp = normpath(joinpath(args["taxdump_dir"], "names.dmp"))
 
     # --- Step 1: Extract Taxonomy from NCBI JSONL ---
-    taxonomy_cmd = `$(args["julia-executable"]) $(TAXONOMY_SCRIPT)
-                        --jsonl $(args["jsonl-files"])
-                        --nodes $(nodes_dmp)
-                        --names $(names_dmp)
-                        --output $(args["output-dir"])`
+    # Construct the command as an array of strings to avoid errors with
+    # interpolating argument lists. The `...` is used to "splat" the
+    # elements of the jsonl_files array into the command.
+    taxonomy_cmd = Cmd([
+        args["julia_executable"],
+        TAXONOMY_SCRIPT,
+        "--jsonl", args["jsonl_files"]...,
+        "--nodes", nodes_dmp,
+        "--names", names_dmp,
+        "--output", normpath(args["output_dir"])
+    ])
     run_command(taxonomy_cmd, "Extract Taxonomy and Assembly Info")
 
     # --- Step 2: Fetch Environment Data from OmniMicrobe ---
-    step1_outputs = filter(f -> occursin("TaxId.csv", f), readdir(args["output-dir"]))
+    step1_outputs = filter(f -> occursin("TaxId.csv", f), readdir(args["output_dir"]))
     for tax_file in step1_outputs
-        input_path = joinpath(args["output-dir"], tax_file)
-        output_path = joinpath(args["output-dir"], replace(tax_file, "TaxId" => "TaxId_Omni"))
+        # Normalize paths inside the loop as well.
+        input_path = normpath(joinpath(args["output_dir"], tax_file))
+        output_path = normpath(joinpath(args["output_dir"], replace(tax_file, "TaxId" => "TaxId_Omni")))
         
-        environment_cmd = `$(args["julia-executable"]) $(ENVIRONMENT_SCRIPT)
-                                --input $(input_path)
-                                --output $(output_path)`
+        # Construct the command as an array for robustness.
+        environment_cmd = Cmd([
+            args["julia_executable"],
+            ENVIRONMENT_SCRIPT,
+            "--input", input_path,
+            "--output", output_path
+        ])
         run_command(environment_cmd, "Fetch Environment Data for $(tax_file)")
     end
 
     # --- Step 3: Calculate Genome Architecture from GFF files ---
-    architecture_output = joinpath(args["output-dir"], "genome_architecture_metrics.csv")
-    architecture_cmd = `$(args["julia-executable"]) $(ARCHITECTURE_SCRIPT)
-                            --inputdir $(args["gff-dir"])
-                            --output $(architecture_output)`
+    # Normalize paths for this step as well.
+    architecture_output = normpath(joinpath(args["output_dir"], "genome_architecture_metrics.csv"))
+    architecture_cmd = Cmd([
+        args["julia_executable"],
+        ARCHITECTURE_SCRIPT,
+        "--inputdir", normpath(args["gff_dir"]),
+        "--output", architecture_output
+    ])
     run_command(architecture_cmd, "Calculate Genome Architecture")
 
     println("Pipeline finished successfully!")

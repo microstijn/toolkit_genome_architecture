@@ -1,8 +1,10 @@
+#!/usr/bin/env julia
+
 #-----------------------------------------------------------------
-#   Description:    Retrieve environment info from omnicrobe.
-#   Author:         SHP
-#   Date:           2025
-#   Revised:        2025-08-07
+#   Description:      Retrieve environment info from omnicrobe.
+#   Author:           SHP
+#   Date:             2025
+#   Revised:          2025-08-08
 #-----------------------------------------------------------------
 
 #-----------------------------------------------------------------
@@ -26,7 +28,7 @@ using JSON3
 Asynchronously fetches environment data for a given taxid from the OmniMicrobe API.
 Returns a tuple containing the original taxid and the fetched data.
 """
-async function fetch_omnicrobe_env(taxid::Int, base_url::String)
+function fetch_omnicrobe_env(taxid::Int, base_url::String)
     full_url = string(base_url, taxid)
     try
         # Perform non-blocking GET request

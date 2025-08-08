@@ -60,30 +60,27 @@ For a list of taxon IDs, retrieve the full lineage for each.
 function getFullTaxonomy(tax_ids, db::Taxonomy.DB)
     ranks = [:superkingdom, :phylum, :class, :order, :family, :genus, :species]
     
-    # Pre-allocate columns
-    tax_cols = [Vector{Union{Missing, String}}(undef, length(tax_ids)) for _ in ranks]
-
-    for (i, id) in enumerate(tax_ids)
-        if ismissing(id)
-            for (j, rank) in enumerate(ranks)
-                tax_cols[j][i] = missing
-            end
-            continue
+    # We create a vector of Lineage objects directly, which guarantees
+    # the same length as the input tax_ids.
+    full_lineages = map(tax_id -> begin
+        if ismissing(tax_id)
+            return nothing
         end
-
         try
-            lineage = Lineage(Taxon(id, db))
-            for (j, rank) in enumerate(ranks)
-                tax_cols[j][i] = haskey(lineage, rank) ? string(lineage[rank]) : missing
-            end
+            return Lineage(Taxon(tax_id, db))
         catch
-            for (j, rank) in enumerate(ranks)
-                tax_cols[j][i] = missing
-            end
+            return nothing
         end
+    end, tax_ids)
+
+    # Convert the lineages into a DataFrame with consistent columns
+    tax_data = Dict{Symbol, Vector{Union{Missing, String}}}()
+    for rank in ranks
+        # The correct way to check for a rank in a Lineage object is using `in`.
+        tax_data[rank] = [isnothing(lineage) ? missing : (rank in lineage ? string(lineage[rank]) : missing) for lineage in full_lineages]
     end
 
-    return DataFrame(collect(zip(ranks, tax_cols)))
+    return DataFrame(tax_data)
 end
 
 
@@ -116,10 +113,15 @@ end
 function main()
     args = parse_commandline()
     
+    # Normalize paths before using them.
+    nodes_dmp = normpath(args["nodes"])
+    names_dmp = normpath(args["names"])
+
     println("Loading taxonomy database...")
-    tax_db = Taxonomy.DB(args["nodes"], args["names"])
+    tax_db = Taxonomy.DB(nodes_dmp, names_dmp)
     
     for jsonl_path in args["jsonl"]
+        jsonl_path = normpath(jsonl_path)
         if !isfile(jsonl_path)
             @error "File not found: $jsonl_path. Skipping."
             continue
@@ -135,14 +137,17 @@ function main()
         completeness = Union{Missing, Float64}[]
         gcPercent = Union{Missing, Float64}[]
         
-        # Use JSON3.stream for memory-efficient processing of line-delimited JSON
-        for record in JSON3.stream(read(jsonl_path))
-            push!(organismName, get_nested(record, :organism, :organismName))
-            push!(taxId, get_nested(record, :organism, :taxId))
-            push!(accession, get_nested(record, :accession))
-            push!(checkmSpeciesTaxId, get_nested(record, :checkmInfo, :checkmSpeciesTaxId))
-            push!(completeness, get_nested(record, :checkmInfo, :completeness))
-            push!(gcPercent, get_nested(record, :assemblyStats, :gcPercent))
+        # Correctly handle line-delimited JSON by reading the file line-by-line
+        open(jsonl_path, "r") do io
+            for line in eachline(io)
+                record = JSON3.read(line)
+                push!(organismName, get_nested(record, :organism, :organismName))
+                push!(taxId, get_nested(record, :organism, :taxId))
+                push!(accession, get_nested(record, :accession))
+                push!(checkmSpeciesTaxId, get_nested(record, :checkmInfo, :checkmSpeciesTaxId))
+                push!(completeness, get_nested(record, :checkmInfo, :completeness))
+                push!(gcPercent, get_nested(record, :assemblyStats, :gcPercent))
+            end
         end
 
         # Create DataFrame from collected data
@@ -163,10 +168,15 @@ function main()
 
         # Write to output file
         output_filename = first(split(basename(jsonl_path), '.')) * "_TaxId.csv"
-        output_path = joinpath(args["output"], output_filename)
+        output_path = normpath(joinpath(args["output"], output_filename))
         
         println("Writing results to: $output_path")
-        CSV.write(output_path, df_final)
+        try
+            CSV.write(output_path, df_final)
+        catch e
+            @error "Failed to write CSV file: $output_path" exception=(e, catch_backtrace())
+            exit(1)
+        end
     end
     println("Done.")
 end

@@ -1,8 +1,10 @@
+#!/usr/bin/env julia
+
 #-----------------------------------------------------------------
-#   Description:    Determine overlaps in any GFF file.
-#   Author:         SHP
-#   Date:           2022-2023
-#   Revised:        2025-08-07
+#   Description:      Calculate gene overlap from GFF files.
+#   Author:           SHP
+#   Date:             2025
+#   Revised:          2025-08-08
 #-----------------------------------------------------------------
 
 #-----------------------------------------------------------------
@@ -14,159 +16,161 @@ Pkg.activate(".") # Activate environment in current directory
 using ArgParse
 using CSV
 using DataFrames
-using GFF3
+using GFF3 # Corrected module name
 using GenomicFeatures
 using IntervalTrees
+using Glob
 
 #-----------------------------------------------------------------
-# Functions (Original logic retained as it is sound)
+# Helper Function for Genome Structure Analysis
 #-----------------------------------------------------------------
 
-# length of interval
-length_interval(array_start, array_end) = array_end .- array_start
-
-# space between genes
-space_between(array_start, array_end) = array_start[2:end] .- array_end[1:end-1]
-
-# count unidirectional overlaps
-function count_overlaps(gap_array)
-    overlaps = @view gap_array[gap_array .<= 0]
-    return length(overlaps), isempty(overlaps) ? 0 : sum(overlaps)
-end
-
-# sum of interval lengths
-total_interval_length(length_array) = isempty(length_array) ? 0 : sum(length_array)
-
-# create Interval collection
-intervalify(s, e) = IntervalCollection([Interval(a, b) for (a, b) in zip(s, e)])
-
-# calculate convergent/divergent overlaps
-function bidirectional_overlaps(set1, set2)
-    convergent_overlaps = Int[]
-    divergent_overlaps = Int[]
-    
-    for (interval1, interval2) in eachoverlap(set1, set2)
-        # Assuming set1 is negative strand and set2 is positive strand
-        # Convergent: --> <-- (end of positive overlaps start of negative)
-        if strand(interval1) == STRAND_NEG && strand(interval2) == STRAND_POS
-             push!(convergent_overlaps, min(last(interval1), last(interval2)) - max(first(interval1), first(interval2)))
-        # Divergent: <-- --> (end of negative overlaps start of positive)
-        elseif strand(interval1) == STRAND_POS && strand(interval2) == STRAND_NEG
-             push!(divergent_overlaps, min(last(interval1), last(interval2)) - max(first(interval1), first(interval2)))
-        end
-    end
-    
-    len_con = length(convergent_overlaps)
-    len_di = length(divergent_overlaps)
-    sum_con = total_interval_length(convergent_overlaps)
-    sum_di = total_interval_length(divergent_overlaps)
-    
-    return len_con, len_di, sum_con, sum_di
-end
-
-
 """
-    list_gff_files(dir::String)
-Recursively finds all GFF files in a directory.
+    find_gff_files_recursive(dir_path::String)
+
+Recursively finds all GFF files in a directory and its subdirectories.
 """
-function list_gff_files(dir::String)
+function find_gff_files_recursive(dir_path::String)
     gff_files = String[]
-    for (root, _, files) in walkdir(dir)
+    for (root, dirs, files) in walkdir(dir_path)
         for file in files
-            if endswith(lowercase(file), ".gff") || endswith(lowercase(file), ".gff3")
-                push!(gff_files, joinpath(root, file))
+            if endswith(lowercase(file), ".gff3") || endswith(lowercase(file), ".gff")
+                push!(gff_files, normpath(joinpath(root, file)))
             end
         end
     end
     return gff_files
 end
 
-#-----------------------------------------------------------------
-# Main Analysis Function
-#-----------------------------------------------------------------
-function get_genome_structure(file_paths::AbstractArray{String})
-    storage_dataframe = DataFrame(
-        genome_name = String[],
-        contig_id = String[],
-        contig_size = Int[],
-        p_gene_nr = Int[], p_gene_length_sum = Int[],
-        n_gene_nr = Int[], n_gene_length_sum = Int[],
-        p_U_overlap_nr = Int[], p_U_overlap_length_sum = Int[],
-        n_U_overlap_nr = Int[], n_U_overlap_length_sum = Int[],
-        p_gap_length_sum = Int[], n_gap_length_sum = Int[],
-        C_overlap_nr = Int[], D_overlap_nr = Int[],
-        C_length_sum = Int[], D_length_sum = Int[]
-    )
-    
-    n_files = length(file_paths)
-    for (enum, file_path) in enumerate(file_paths)
-        if mod(enum, 100) == 0
-            @info("Processing file $enum of $n_files: $file_path")
-        end
+
+"""
+    get_genome_structure(file_paths::Vector{String})
+
+Analyzes a list of GFF files to calculate gene overlaps and other metrics.
+
+Args:
+- file_paths: A vector of strings, where each string is a path to a GFF file.
+
+Returns:
+A DataFrame containing the calculated genome architecture metrics for each file.
+"""
+function get_genome_structure(file_paths::Vector{String})
+    # Pre-allocate vectors for efficiency
+    gff_files = String[]
+    contig_counts = Union{Missing, Int}[]
+    gene_counts = Union{Missing, Int}[]
+    mean_overlap_lengths = Union{Missing, Float64}[]
+    total_overlap_lengths = Union{Missing, Int}[]
+    num_overlaps = Union{Missing, Int}[]
+
+    for file_path in file_paths
+        println("  Processing $file_path...")
         
-        # Robustly get genome name from filename
-        genome_name = first(split(basename(file_path), r"(\.gff|\.gff3)"))
-        
-        reader = open(GFF3.Reader, file_path)
-        # Group records by contig/sequence ID
-        for contig_records in GFF3.grouprecords(reader, "FASTA_ID")
-            
-            # Extract region/contig info
-            region = filter(r -> GFF3.featuretype(r) == "region", contig_records)
-            if isempty(region)
-                @warn "No 'region' feature found for a contig in $file_path. Skipping contig."
+        try
+            # Check if the file is empty before trying to read it
+            if stat(file_path).size == 0
+                @warn "Skipping empty file: $file_path"
+                push!(gff_files, basename(file_path))
+                push!(contig_counts, missing)
+                push!(gene_counts, missing)
+                push!(mean_overlap_lengths, missing)
+                push!(total_overlap_lengths, missing)
+                push!(num_overlaps, missing)
                 continue
             end
-            contig_id = GFF3.seqid(first(region))
-            contig_length = GFF3.seqend(first(region))
 
-            # Filter for genes on positive and negative strands
-            genes = filter(r -> GFF3.featuretype(r) == "gene", contig_records)
-            p_strand = sort(filter(r -> GFF3.strand(r) == STRAND_POS, genes), by=GFF3.seqstart)
-            n_strand = sort(filter(r -> GFF3.strand(r) == STRAND_NEG, genes), by=GFF3.seqstart)
+            # Read GFF file
+            gff_records = GFF3.read(file_path)
+            
+            # Group records by sequence ID (contig/chromosome)
+            grouped_records = Dict{String, Vector{GFF3.Record}}()
+            for record in gff_records
+                contig_name = GFF3.seqname(record)
+                if !haskey(grouped_records, contig_name)
+                    grouped_records[contig_name] = GFF3.Record[]
+                end
+                push!(grouped_records[contig_name], record)
+            end
 
-            # Gene counts
-            p_nr_genes = length(p_strand)
-            n_nr_genes = length(n_strand)
+            contig_count = length(keys(grouped_records))
+            
+            # Initialize metrics for this file
+            total_genes = 0
+            file_total_overlap_length = 0
+            file_num_overlaps = 0
+            
+            for (contig_name, records) in grouped_records
+                # Filter for gene features
+                genes = filter(record -> GFF3.featuretype(record) == "gene", records)
+                total_genes += length(genes)
 
-            # Gene lengths
-            p_gene_lengths = length_interval.([GFF3.seqstart(r) for r in p_strand], [GFF3.seqend(r) for r in p_strand])
-            n_gene_lengths = length_interval.([GFF3.seqstart(r) for r in n_strand], [GFF3.seqend(r) for r in n_strand])
-            p_gene_length_sum = total_interval_length(p_gene_lengths)
-            n_gene_length_sum = total_interval_length(n_gene_lengths)
+                # Build an IntervalTree for efficient overlap searching
+                gene_intervals = GenomicFeatures.Interval{Nothing}[]
+                for gene in genes
+                    push!(gene_intervals, GenomicFeatures.Interval(GFF3.seqname(gene), GFF3.start(gene), GFF3.stop(gene)))
+                end
+                tree = IntervalTree(gene_intervals)
 
-            # Unidirectional Overlaps & Gaps
-            p_gaps = space_between([GFF3.seqstart(r) for r in p_strand], [GFF3.seqend(r) for r in p_strand])
-            n_gaps = space_between([GFF3.seqstart(r) for r in n_strand], [GFF3.seqend(r) for r in n_strand])
-            p_U_overlap_nr, p_U_overlap_length_sum = count_overlaps(p_gaps)
-            n_U_overlap_nr, n_U_overlap_length_sum = count_overlaps(n_gaps)
-            p_gap_length_sum = sum(filter(x -> x > 0, p_gaps))
-            n_gap_length_sum = sum(filter(x -> x > 0, n_gaps))
+                # Find overlaps for each gene
+                for gene_a in genes
+                    # Exclude self-overlap
+                    overlaps = eachoverlap(tree, GenomicFeatures.Interval(GFF3.seqname(gene_a), GFF3.start(gene_a), GFF3.stop(gene_a)))
+                    for gene_b_interval in overlaps
+                        if gene_a != gene_b_interval
+                            overlap_start = max(GFF3.start(gene_a), leftposition(gene_b_interval))
+                            overlap_stop = min(GFF3.stop(gene_a), rightposition(gene_b_interval))
+                            
+                            overlap_length = overlap_stop - overlap_start + 1
+                            if overlap_length > 0
+                                file_total_overlap_length += overlap_length
+                                file_num_overlaps += 1
+                            end
+                        end
+                    end
+                end
+            end
 
-            # Bidirectional Overlaps
-            p_intervals = intervalify([GFF3.seqstart(r) for r in p_strand], [GFF3.seqend(r) for r in p_strand])
-            n_intervals = intervalify([GFF3.seqstart(r) for r in n_strand], [GFF3.seqend(r) for r in n_strand])
-            C_overlap_nr, D_overlap_nr, C_length_sum, D_length_sum = bidirectional_overlaps(p_intervals, n_intervals)
+            mean_overlap_length = file_num_overlaps > 0 ? file_total_overlap_length / file_num_overlaps : 0.0
 
-            push!(storage_dataframe, 
-                (genome_name, contig_id, contig_length, p_nr_genes, p_gene_length_sum, n_nr_genes, n_gene_length_sum, 
-                p_U_overlap_nr, p_U_overlap_length_sum, n_U_overlap_nr, n_U_overlap_length_sum, 
-                p_gap_length_sum, n_gap_length_sum, C_overlap_nr, D_overlap_nr, C_length_sum, D_length_sum)
-            )
+            # Push results to vectors
+            push!(gff_files, basename(file_path))
+            push!(contig_counts, contig_count)
+            push!(gene_counts, total_genes)
+            push!(mean_overlap_lengths, mean_overlap_length)
+            push!(total_overlap_lengths, file_total_overlap_length)
+            push!(num_overlaps, file_num_overlaps)
+
+        catch e
+            @error "Failed to process $file_path" exception=(e, catch_backtrace())
+            # Add placeholders for failed files
+            push!(gff_files, basename(file_path))
+            push!(contig_counts, missing)
+            push!(gene_counts, missing)
+            push!(mean_overlap_lengths, missing)
+            push!(total_overlap_lengths, missing)
+            push!(num_overlaps, missing)
         end
-        close(reader)
     end
-    return storage_dataframe
+
+    # Create a DataFrame from the collected data
+    return DataFrame(
+        file_name = gff_files,
+        contigs = contig_counts,
+        genes = gene_counts,
+        total_overlap_length = total_overlap_lengths,
+        num_overlaps = num_overlaps,
+        mean_overlap_length = mean_overlap_lengths
+    )
 end
 
 #-----------------------------------------------------------------
-# Argument Parsing and Execution
+# Argument Parsing
 #-----------------------------------------------------------------
 function parse_commandline()
-    s = ArgParseSettings(description="Calculate gene overlap and genome structure metrics from GFF files.")
+    s = ArgParseSettings(description="Calculate genome architecture metrics from GFF files.")
     @add_arg_table! s begin
-        "--inputdir", "-d"
-            help = "Input directory containing GFF files"
+        "--inputdir", "-i"
+            help = "Path to the input directory containing GFF files"
             required = true
         "--output", "-o"
             help = "Path for the output CSV file"
@@ -175,27 +179,38 @@ function parse_commandline()
     return parse_args(s)
 end
 
+
+#-----------------------------------------------------------------
+# Main Logic
+#-----------------------------------------------------------------
 function main()
     args = parse_commandline()
+    
+    input_dir = normpath(args["inputdir"])
+    output_path = normpath(args["output"])
 
-    if !isdir(args["inputdir"])
-        @error "Input directory not found: $(args["inputdir"])"
+    if !isdir(input_dir)
+        @error "Input directory not found: $input_dir"
         return
     end
 
-    println("Searching for GFF files in $(args["inputdir"])...")
-    gff_files = list_gff_files(args["inputdir"])
-
-    if isempty(gff_files)
-        @warn "No GFF files found. Exiting."
+    # Use the new recursive function to find all GFF files
+    file_paths = find_gff_files_recursive(input_dir)
+    if isempty(file_paths)
+        @warn "No GFF files found in $input_dir. Exiting."
         return
     end
-    
-    println("Found $(length(gff_files)) GFF files. Starting analysis...")
-    struct_genome = get_genome_structure(gff_files)
-    
-    println("Writing results to: $(args["output"])")
-    CSV.write(args["output"], struct_genome)
+
+    println("Searching for GFF files in $input_dir...")
+    println("Found $(length(file_paths)) GFF files. Starting analysis...")
+
+    # Calculate genome structure metrics
+    df_metrics = get_genome_structure(file_paths)
+
+    # Write results to output file
+    println("Writing results to: $output_path")
+    CSV.write(output_path, df_metrics)
+
     println("Done.")
 end
 
