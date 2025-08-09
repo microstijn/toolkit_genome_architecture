@@ -138,8 +138,9 @@ function main()
         gcPercent = Union{Missing, Float64}[]
         
         # Correctly handle line-delimited JSON by reading the file line-by-line
+        total_lines = length(readlines(jsonl_path)) # Count lines for progress bar
         open(jsonl_path, "r") do io
-            for line in eachline(io)
+            for (i, line) in enumerate(eachline(io))
                 record = JSON3.read(line)
                 push!(organismName, get_nested(record, :organism, :organismName))
                 push!(taxId, get_nested(record, :organism, :taxId))
@@ -147,8 +148,14 @@ function main()
                 push!(checkmSpeciesTaxId, get_nested(record, :checkmInfo, :checkmSpeciesTaxId))
                 push!(completeness, get_nested(record, :checkmInfo, :completeness))
                 push!(gcPercent, get_nested(record, :assemblyStats, :gcPercent))
+
+                # Update and print a simple progress bar
+                percentage = round(Int, (i / total_lines) * 100)
+                progress_bar = "[" * repeat("=", percentage) * repeat(" ", 100 - percentage) * "]"
+                print("\rProgress: $progress_bar $percentage% (Record $i of $total_lines)")
             end
         end
+        println("\nProcessing complete.")
 
         # Create DataFrame from collected data
         df = DataFrame(

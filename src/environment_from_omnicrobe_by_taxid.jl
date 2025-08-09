@@ -88,20 +88,29 @@ function main()
     # API endpoint
     base_url = "https://omnicrobe.migale.inrae.fr/api/search/relations?taxid=ncbi%3A"
 
-    tasks = []
     unique_taxids = unique(skipmissing(df.taxId))
+    n_taxids = length(unique_taxids)
+
+    println("Querying OmniMicrobe for $n_taxids unique taxon IDs...")
     
-    println("Querying OmniMicrobe for $(length(unique_taxids)) unique taxon IDs...")
-    
+    tasks = Vector{Task}()
     # Create an asynchronous task for each API call
     for taxid in unique_taxids
         task = @async fetch_omnicrobe_env(taxid, base_url)
         push!(tasks, task)
     end
-
-    # Wait for all tasks to complete and collect the results
-    results = [fetch(t) for t in tasks]
     
+    # Wait for all tasks to complete and collect the results
+    results = []
+    for (i, t) in enumerate(tasks)
+        push!(results, fetch(t))
+        # Update and print a simple progress bar
+        percentage = round(Int, (i / n_taxids) * 100)
+        progress_bar = "[" * repeat("=", percentage) * repeat(" ", 100 - percentage) * "]"
+        print("\rProgress: $progress_bar $percentage% (TaxID $i of $n_taxids)")
+    end
+    println("\nProcessing complete.")
+
     # Convert the results into a DataFrame for easy merging
     results_df = DataFrame(
         taxId = [r[1] for r in results],
