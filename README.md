@@ -12,10 +12,6 @@ The entire process is managed by a central pipeline controller (`run_pipeline.jl
     * Maps organisms to known environments using the OmniMicrobe database.
     * Calculates unidirectional, convergent, and divergent gene overlaps.
 
-## Workflow
-
-The master script `run_pipeline.jl` manages this flow automatically.
-
 ## TODO
 
 ### Module for Pre-Binned Metagenomes
