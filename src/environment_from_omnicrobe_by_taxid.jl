@@ -1,10 +1,10 @@
 #!/usr/bin/env julia
 
 #-----------------------------------------------------------------
-#   Description:      Retrieve environment info from omnicrobe.
+#   Description:      Retrieve environment info from omnicrobe and output in a tidy format.
 #   Author:           SHP
 #   Date:             2025
-#   Revised:          2025-08-08
+#   Revised:          2025-09-05
 #-----------------------------------------------------------------
 
 #-----------------------------------------------------------------
@@ -40,7 +40,8 @@ function fetch_omnicrobe_env(taxid::Int, base_url::String)
                 return (taxid, missing, missing)
             end
             
-            envs = [item.obt_forms for item in json_obj]
+            # Extract and clean up the primary environment term from the list of forms
+            envs = [item.obt_forms[1] for item in json_obj] # Take the first, most representative term
             obtids = [item.obtid for item in json_obj]
             return (taxid, envs, obtids)
         else
@@ -62,8 +63,8 @@ function parse_commandline()
         "--input", "-i"
             help = "Input CSV file containing a 'taxId' column"
             required = true
-        "--output", "-o"
-            help = "Path for the output CSV file"
+        "--output-dir", "-o"
+            help = "Path for the output directory. Two files will be created here."
             required = true
     end
     return parse_args(s)
@@ -81,6 +82,15 @@ function main()
         @error "Input file not found: $(args["input"])"
         return
     end
+
+    # Define output paths
+    output_dir = args["output-dir"]
+    mkpath(output_dir) # Ensure directory exists
+    
+    # Construct output filenames based on the input filename
+    base_name = first(split(basename(args["input"]), '_'))
+    genome_report_path = joinpath(output_dir, base_name * "_genomes_report.csv")
+    environments_path = joinpath(output_dir, base_name * "_genome_environments.csv")
 
     println("Reading input file: $(args["input"])")
     df = CSV.File(args["input"]) |> DataFrame
@@ -111,19 +121,36 @@ function main()
     end
     println("\nProcessing complete.")
 
-    # Convert the results into a DataFrame for easy merging
-    results_df = DataFrame(
-        taxId = [r[1] for r in results],
-        environments = [r[2] for r in results],
-        obtId = [r[3] for r in results]
-    )
+    # Create a mapping from taxId to accession for the environment table
+    taxid_to_accession = Dict(zip(df.taxId, df.accession))
 
-    println("Merging results...")
-    # Join the fetched data back to the original dataframe
-    final_df = leftjoin(df, results_df, on=:taxId)
+    # --- Create the Tidy Environments DataFrame ---
+    env_df = DataFrame(accession=String[], environment=String[], obtId=String[])
     
-    println("Writing results to: $(args["output"])")
-    CSV.write(args["output"], final_df, delim='\t')
+    for (taxid, envs, obtids) in results
+        if !ismissing(envs)
+            accession = get(taxid_to_accession, taxid, "Unknown_Accession")
+            for (env, obtid) in zip(envs, obtids)
+                push!(env_df, (accession, env, obtid))
+            end
+        end
+    end
+
+    println("Writing tidy environment data to: $environments_path")
+    CSV.write(environments_path, env_df, delim='\t')
+    
+    # --- Create and Write the Main Genomes Report ---
+    # Remove the old environment columns if they exist
+    if "environments" in names(df)
+        select!(df, Not(:environments))
+    end
+    if "obtId" in names(df)
+        select!(df, Not(:obtId))
+    end
+    
+    println("Writing main genome report to: $genome_report_path")
+    CSV.write(genome_report_path, df, delim='\t')
+
     println("Done.")
 end
 

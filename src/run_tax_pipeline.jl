@@ -1,10 +1,10 @@
 #!/usr/bin/env julia
 
 #=====================================================
-# Description:   Controls anc combines the separate scripts.
+# Description:   Controls and combines the separate scripts.
 # Author:        SHP
 # Date:          2025
-# Revised:       2025-08-07
+# Revised:       2025-09-05
 =====================================================#
 using Pkg
 Pkg.activate(".")
@@ -15,6 +15,7 @@ const SCRIPT_DIR = @__DIR__
 const TAXONOMY_SCRIPT = joinpath(SCRIPT_DIR, "taxid_from_ncbi_JSON.jl")
 const ENVIRONMENT_SCRIPT = joinpath(SCRIPT_DIR, "environment_from_omnicrobe_by_taxid.jl")
 const ARCHITECTURE_SCRIPT = joinpath(SCRIPT_DIR, "calc_gene_overlap_on_GFF.jl")
+
 """
     run_command(command, step_name)
 
@@ -36,88 +37,73 @@ end
 """
     parse_commandline()
 
-Parses command-line arguments for the pipeline.
+Parses command-line arguments for the main pipeline controller.
 """
 function parse_commandline()
-    s = ArgParseSettings(
-        description = "Master Pipeline Controller for Genome Architecture Analysis.",
-        autofix_names = true
-    )
+    s = ArgParseSettings(description="Main pipeline controller for genome architecture and taxonomy analysis.")
     @add_arg_table! s begin
-        "--jsonl-files"
-            help = "One or more paths to the NCBI 'assembly_data_report.jsonl' files."
+        "--jsonl-files", "-j"
+            help = "Paths to one or more NCBI assembly_data_report.jsonl files"
             nargs = '+'
             required = true
-        "--gff-dir"
-            help = "Path to the input directory containing all GFF files."
+        "--gff-dir", "-g"
+            help = "Path to the directory containing all GFF genome files"
             required = true
-        "--taxdump-dir"
-            help = "Path to the directory containing 'nodes.dmp' and 'names.dmp'."
+        "--taxdump-dir", "-t"
+            help = "Path to the directory containing nodes.dmp and names.dmp"
             required = true
-        "--output-dir"
-            help = "Path to the directory where all output files will be saved."
+        "--output-dir", "-o"
+            help = "Directory where all results will be saved"
             required = true
         "--julia-executable"
-            help = "Path to the Julia executable (if not in system PATH)."
-            default = "julia"
+            help = "Path to the Julia executable"
+            default = Sys.iswindows() ? "julia.exe" : "julia"
     end
     return parse_args(s)
 end
 
-"""
-    main()
-
-Main function to orchestrate the pipeline execution.
-"""
 function main()
     args = parse_commandline()
+    mkpath(args["output-dir"])
 
-    # --- Setup ---
-    # Create the main output directory if it doesn't exist.
-    mkpath(args["output_dir"])
+    # --- Step 1: Extract Taxonomy and Assembly Info ---
+    nodes_dmp = normpath(joinpath(args["taxdump-dir"], "nodes.dmp"))
+    names_dmp = normpath(joinpath(args["taxdump-dir"], "names.dmp"))
 
-    # Define paths for taxdump files, normalizing them to prevent path errors.
-    nodes_dmp = normpath(joinpath(args["taxdump_dir"], "nodes.dmp"))
-    names_dmp = normpath(joinpath(args["taxdump_dir"], "names.dmp"))
-
-    # --- Step 1: Extract Taxonomy from NCBI JSONL ---
-    # Construct the command as an array of strings to avoid errors with
-    # interpolating argument lists. The `...` is used to "splat" the
-    # elements of the jsonl_files array into the command.
+    # Construct the command as an array for robustness against spaces in paths.
+    # CORRECTED KEY: Use "julia-executable" with a hyphen
     taxonomy_cmd = Cmd([
-        args["julia_executable"],
+        args["julia-executable"],
         TAXONOMY_SCRIPT,
-        "--jsonl", args["jsonl_files"]...,
+        "--jsonl", args["jsonl-files"]...,
         "--nodes", nodes_dmp,
         "--names", names_dmp,
-        "--output", normpath(args["output_dir"])
+        "--output", normpath(args["output-dir"])
     ])
     run_command(taxonomy_cmd, "Extract Taxonomy and Assembly Info")
 
     # --- Step 2: Fetch Environment Data from OmniMicrobe ---
-    step1_outputs = filter(f -> occursin("TaxId.csv", f), readdir(args["output_dir"]))
+    step1_outputs = filter(f -> occursin("_TaxId.csv", f), readdir(args["output-dir"]))
     for tax_file in step1_outputs
-        # Normalize paths inside the loop as well.
-        input_path = normpath(joinpath(args["output_dir"], tax_file))
-        output_path = normpath(joinpath(args["output_dir"], replace(tax_file, "TaxId" => "TaxId_Omni")))
+        input_path = normpath(joinpath(args["output-dir"], tax_file))
         
-        # Construct the command as an array for robustness.
+        # CORRECTED KEY: Use "julia-executable" with a hyphen
         environment_cmd = Cmd([
-            args["julia_executable"],
+            args["julia-executable"],
             ENVIRONMENT_SCRIPT,
             "--input", input_path,
-            "--output", output_path
+            "--output-dir", normpath(args["output-dir"])
         ])
         run_command(environment_cmd, "Fetch Environment Data for $(tax_file)")
     end
 
     # --- Step 3: Calculate Genome Architecture from GFF files ---
-    # Normalize paths for this step as well.
-    architecture_output = normpath(joinpath(args["output_dir"], "genome_architecture_metrics.csv"))
+    architecture_output = normpath(joinpath(args["output-dir"], "genome_architecture_metrics.csv"))
+    # CORRECTED KEY: Use "julia-executable" with a hyphen
     architecture_cmd = Cmd([
-        args["julia_executable"],
+        args["julia-executable"],
         ARCHITECTURE_SCRIPT,
-        "--inputdir", normpath(args["gff_dir"]),
+        "--inputdir", normpath(args["gff-dir"]),
         "--output", architecture_output
     ])
     run_command(architecture_cmd, "Calculate Genome Architecture")
@@ -125,5 +111,4 @@ function main()
     println("Pipeline finished successfully!")
 end
 
-# --- Run the pipeline ---
 main()

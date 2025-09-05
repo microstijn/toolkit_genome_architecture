@@ -2,20 +2,11 @@
 #   Description:    From JSONL from NCBI retrieve INFO.
 #   Author:         SHP
 #   Date:           2025
-#   Revised:        2025-08-07
+#   Revised:        2025-09-05 (Updated with robust taxonomy lookup)
 #-----------------------------------------------------------------
 #= 
 Notes:
 This data comes from downloading data from the NCBI using the command line toolkit.
-I used the following command to download all refence gffs:
-datasets download genome taxon 2 --assembly-source refseq --reference --include gff3,gtf,seq-report --dehydrated --filename bacteria_reference.zip
-datasets download genome taxon 2157 --assembly-source refseq --reference --include gff3,gtf,seq-report --dehydrated --filename archaea_reference.zip
-datasets rehydrate --directory archaea_reference/ 
-datasets rehydrate --directory bacteria_reference/ 
-
-The command download all gff3, gts and seq reports.
-I am to query the accompagnying JSON file for info on the assmblies etc. 
-
 The taxdump is obtained from ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
 =#
 
@@ -34,128 +25,189 @@ using Taxonomy
 #-----------------------------------------------------------------
 # Helper Functions
 #-----------------------------------------------------------------
-
 """
-    get_nested(obj, keys...; default=missing)
+    get_nested(obj, keys...)
 
-Safely retrieve a nested value from a JSON object.
+Safely access nested keys in a JSON3 object. Returns `missing` if any key is not found.
 """
-function get_nested(obj, keys...; default=missing)
+function get_nested(obj, keys...)
     val = obj
-    for k in keys
-        if !isnothing(val) && haskey(val, k)
-            val = val[k]
-        else
-            return default
+    for key in keys
+        if !haskey(val, key)
+            return missing
         end
+        val = val[key]
     end
     return val
 end
 
 """
-    getFullTaxonomy(tax_ids, db)
+    getFullTaxonomy(taxId, taxNodesLoc, taxNamesLoc)
 
-For a list of taxon IDs, retrieve the full lineage for each.
+Robustly retrieves the full taxonomic lineage for a vector of NCBI TaxIDs.
+Handles missing ranks by filling them with "NA".
 """
-function getFullTaxonomy(tax_ids, db::Taxonomy.DB)
-    ranks = [:superkingdom, :phylum, :class, :order, :family, :genus, :species]
+function getFullTaxonomy(taxId, taxNodesLoc::String, taxNamesLoc::String)
     
-    # We create a vector of Lineage objects directly, which guarantees
-    # the same length as the input tax_ids.
-    full_lineages = map(tax_id -> begin
-        if ismissing(tax_id)
-            return nothing
-        end
-        try
-            return Lineage(Taxon(tax_id, db))
-        catch
-            return nothing
-        end
-    end, tax_ids)
+    errNode = isfile(taxNodesLoc)
+    errNode == true || throw("$taxNodesLoc is not a file")
+    errName = isfile(taxNamesLoc)
+    errName == true || throw("$taxNamesLoc is not a file")
 
-    # Convert the lineages into a DataFrame with consistent columns
-    tax_data = Dict{Symbol, Vector{Union{Missing, String}}}()
-    for rank in ranks
-        # The correct way to check for a rank in a Lineage object is using `in`.
-        tax_data[rank] = [isnothing(lineage) ? missing : (rank in lineage ? string(lineage[rank]) : missing) for lineage in full_lineages]
+    println("Loading taxonomy database from taxdump files...")
+    db = Taxonomy.DB(taxNodesLoc, taxNamesLoc)
+
+    taxid_ordered_dataframe = DataFrame(
+        superkingdom = String[],
+        phylum = String[],
+        class = String[],
+        order = String[],
+        family = String[],
+        genus = String[],
+        species = String[]
+    )
+
+    total_ids = length(taxId)
+    for (i, id) in enumerate(taxId)
+        # Update and print a simple progress bar
+        percentage = round(Int, (i / total_ids) * 100)
+        progress_bar = "[" * repeat("=", percentage) * repeat(" ", 100 - percentage) * "]"
+        print("\rTaxonomy Progress: $progress_bar $percentage% (ID $i of $total_ids)")
+
+        # Set defaults
+        superkingdom, phylum, class, order, family, genus_tax, species_tax = "NA", "NA", "NA", "NA", "NA", "NA", "NA"
+        
+        if ismissing(id)
+            push!(taxid_ordered_dataframe, ["NA", "NA", "NA", "NA", "NA", "NA", "NA"])
+            continue
+        end
+
+        lineage_tax = "NA"
+        try 
+            tax = Taxon(id, db)
+            lineage_tax = Lineage(tax)
+        catch;
+            lineage_tax = "NA"
+        end
+
+        if lineage_tax != "NA"
+            try 
+                superkingdom = string(lineage_tax[:superkingdom])
+            catch; # Already "NA"
+            end
+
+            try 
+                phylum = string(lineage_tax[:phylum])
+            catch; # Already "NA"
+            end
+
+            try 
+                class = string(lineage_tax[:class])
+            catch; # Already "NA"
+            end
+
+            try 
+                order = string(lineage_tax[:order])
+            catch; # Already "NA"
+            end
+
+            try 
+                family = string(lineage_tax[:family])
+            catch; # Already "NA"
+            end
+    
+            try 
+                genus_tax = string(lineage_tax[:genus])
+            catch; # Already "NA"
+            end
+
+            try 
+                species_tax = string(lineage_tax[:species])
+            catch; # Already "NA"
+            end
+        end
+
+        push!(taxid_ordered_dataframe, [
+            superkingdom,
+            phylum,
+            class,
+            order,
+            family,
+            genus_tax,
+            species_tax
+        ])
     end
-
-    return DataFrame(tax_data)
+    println("\nTaxonomy lookup complete.")
+    return taxid_ordered_dataframe
 end
 
 
 #-----------------------------------------------------------------
-# Argument Parsing
+# Main Function
 #-----------------------------------------------------------------
+
 function parse_commandline()
-    s = ArgParseSettings(description="Extract assembly metadata from NCBI JSONL files and add full taxonomy.")
+    s = ArgParseSettings(description="Extract assembly and taxonomy info from NCBI JSONL files.")
     @add_arg_table! s begin
         "--jsonl", "-j"
-            help = "Input assembly_data_report.jsonl file(s)"
+            help = "Path to one or more NCBI assembly_data_report.jsonl files"
             nargs = '+'
             required = true
         "--nodes", "-n"
-            help = "Path to NCBI taxdump nodes.dmp file"
+            help = "Path to the nodes.dmp file from NCBI taxdump"
             required = true
         "--names", "-m"
-            help = "Path to NCBI taxdump names.dmp file"
+            help = "Path to the names.dmp file from NCBI taxdump"
             required = true
         "--output", "-o"
-            help = "Output directory for the resulting CSV files"
+            help = "Path to the output directory"
             required = true
     end
     return parse_args(s)
 end
 
-#-----------------------------------------------------------------
-# Main Logic
-#-----------------------------------------------------------------
 function main()
     args = parse_commandline()
     
-    # Normalize paths before using them.
-    nodes_dmp = normpath(args["nodes"])
-    names_dmp = normpath(args["names"])
+    # Ensure output directory exists
+    mkpath(args["output"])
 
-    println("Loading taxonomy database...")
-    tax_db = Taxonomy.DB(nodes_dmp, names_dmp)
-    
     for jsonl_path in args["jsonl"]
-        jsonl_path = normpath(jsonl_path)
         if !isfile(jsonl_path)
-            @error "File not found: $jsonl_path. Skipping."
+            @warn "File not found: $jsonl_path. Skipping."
             continue
         end
 
         println("Processing file: $jsonl_path")
-
-        # Pre-allocate column vectors for performance
+        
+        # Pre-allocate vectors
         organismName = Union{Missing, String}[]
-        taxId = Union{Missing, Int}[]
+        taxId = Union{Missing, Int64}[]
         checkmSpeciesTaxId = Union{Missing, Int}[]
         accession = Union{Missing, String}[]
         completeness = Union{Missing, Float64}[]
         gcPercent = Union{Missing, Float64}[]
         
-        # Correctly handle line-delimited JSON by reading the file line-by-line
-        total_lines = length(readlines(jsonl_path)) # Count lines for progress bar
+        total_lines = countlines(jsonl_path)
+        
         open(jsonl_path, "r") do io
             for (i, line) in enumerate(eachline(io))
                 record = JSON3.read(line)
+                
                 push!(organismName, get_nested(record, :organism, :organismName))
                 push!(taxId, get_nested(record, :organism, :taxId))
-                push!(accession, get_nested(record, :accession))
                 push!(checkmSpeciesTaxId, get_nested(record, :checkmInfo, :checkmSpeciesTaxId))
+                push!(accession, get_nested(record, :accession))
                 push!(completeness, get_nested(record, :checkmInfo, :completeness))
                 push!(gcPercent, get_nested(record, :assemblyStats, :gcPercent))
 
                 # Update and print a simple progress bar
                 percentage = round(Int, (i / total_lines) * 100)
                 progress_bar = "[" * repeat("=", percentage) * repeat(" ", 100 - percentage) * "]"
-                print("\rProgress: $progress_bar $percentage% (Record $i of $total_lines)")
+                print("\rJSONL Progress: $progress_bar $percentage% (Record $i of $total_lines)")
             end
         end
-        println("\nProcessing complete.")
+        println("\nJSONL processing complete.")
 
         # Create DataFrame from collected data
         df = DataFrame(
@@ -168,7 +220,7 @@ function main()
         )
 
         println("Retrieving full taxonomy for $(nrow(df)) entries...")
-        full_tax = getFullTaxonomy(df.taxId, tax_db)
+        full_tax = getFullTaxonomy(df.taxId, args["nodes"], args["names"])
         
         # Combine the dataframes
         df_final = hcat(df, full_tax)
@@ -181,11 +233,10 @@ function main()
         try
             CSV.write(output_path, df_final)
         catch e
-            @error "Failed to write CSV file: $output_path" exception=(e, catch_backtrace())
-            exit(1)
+            @error "Failed to write CSV file at $output_path." exception=(e, catch_backtrace())
         end
+        println("Finished processing $jsonl_path.\n")
     end
-    println("Done.")
 end
 
 main()
