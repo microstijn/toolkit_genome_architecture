@@ -1,7 +1,7 @@
 # Genome Architecture & Taxonomy Toolkit
 
 ** NOW NO LONGER MAINTAINED **
-See https://github.com/microstijn/genArch for further developments. 
+See https://github.com/microstijn/genomeArch for further developments. 
 
 This toolkit provides a suite of modular, command-line driven scripts for analyzing prokaryotic genomes. The primary workflow extracts taxonomic and assembly metadata from NCBI datasets, retrieves associated environmental data from the OmniMicrobe API, and calculates detailed gene overlap and genome architecture metrics from GFF files.
 
